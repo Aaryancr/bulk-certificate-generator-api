@@ -1,18 +1,18 @@
 class BulkCertificateError(Exception):
-    """Base exception for bulk certificate generation errors."""
+    pass
 
 
 class ValidationError(BulkCertificateError):
-    """Raised when input data is invalid."""
+    pass
 
 
 class TemplateError(BulkCertificateError):
-    """Raised when the certificate template is invalid."""
+    pass
 
 
 class CertificateGenerationError(BulkCertificateError):
-    """Raised when a certificate cannot be generated."""
+    pass
 
 
 class ZipGenerationError(BulkCertificateError):
-    """Raised when ZIP creation fails."""
+    pass
