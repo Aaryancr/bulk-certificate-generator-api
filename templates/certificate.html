@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Certificate</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        text-align: center;
+        margin: 60px;
+        color: #1f2937;
+      }
+      .container {
+        border: 3px solid #d1d5db;
+        padding: 40px;
+      }
+      h1 {
+        font-size: 36px;
+        margin-bottom: 20px;
+      }
+      .name {
+        font-size: 28px;
+        font-weight: bold;
+        margin: 20px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Certificate of Completion</h1>
+      <p>This is to certify that</p>
+      <div class="name">{{ name }}</div>
+      <p>has successfully completed the course</p>
+      <h2>{{ course }}</h2>
+      <p>Date: {{ date }}</p>
+      <p>Certificate ID: {{ certificate_id }}</p>
+    </div>
+  </body>
+</html>
