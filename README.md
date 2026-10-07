@@ -1,25 +1,29 @@
 # Bulk Certificate Generator API
 
-A FastAPI backend for generating personalized certificates in bulk from a CSV file and an HTML/Jinja2 template.
+A FastAPI backend for asynchronously generating personalized PDF certificates in bulk from CSV data using a predefined HTML/Jinja2 template.
 
-The API validates the input data, renders a certificate for each valid record, converts the rendered HTML into PDF, packages the generated certificates into a ZIP archive, and returns the ZIP as the API response.
+The API validates recipient data, schedules certificate generation as a background task, persists job status and progress in an SQLite database, and packages generated certificates into downloadable ZIP archives.
 
 ## Features
 
-- CSV validation and parsing
-- Jinja2 HTML template rendering
-- Personalized PDF certificate generation
-- Bulk certificate processing
-- Partial failure handling
-- In-memory ZIP generation
-- REST API with FastAPI
-- Automated test suite
-- No database or external services required
+- Asynchronous bulk certificate generation via FastAPI background tasks
+- SQLite database persistence with SQLAlchemy for tracking generation requests
+- Job progress and status tracking (`pending`, `processing`, `completed`, `completed_with_errors`, `failed`)
+- Detailed progress metrics (`total`, `completed`, `failed`)
+- CSV validation, sanitization, and duplicate detection
+- Jinja2 template rendering using a predefined template (`templates/certificate.html`)
+- PDF certificate generation with WeasyPrint
+- Deterministic output naming (`certificate_<certificate_id>.pdf`)
+- Persistent ZIP storage with on-demand download endpoint
+- Partial failure handling with detailed error reporting via `FAILURES.txt` inside the ZIP
+- Automated test suite with isolated SQLite database fixtures
 
 ## Tech Stack
 
 - Python 3.12
 - FastAPI
+- SQLAlchemy
+- SQLite
 - Pydantic
 - Jinja2
 - WeasyPrint
@@ -34,14 +38,19 @@ app/
 │   └── routes.py
 ├── core/
 │   └── config.py
+├── db/
+│   ├── database.py
+│   └── models.py
 ├── schemas/
 │   └── certificate.py
 ├── services/
-│   ├── csv_service.py
-│   ├── template_service.py
-│   ├── certificate_service.py
-│   ├── certificate_generator.py
 │   ├── bulk_certificate_service.py
+│   ├── certificate_generator.py
+│   ├── certificate_service.py
+│   ├── csv_service.py
+│   ├── generation_job_service.py
+│   ├── request_lookup_service.py
+│   ├── template_service.py
 │   └── zip_service.py
 └── exceptions.py
 
@@ -49,14 +58,18 @@ templates/
 └── certificate.html
 
 tests/
-├── test_health.py
-├── test_csv_service.py
-├── test_template_service.py
-├── test_certificate_service.py
-├── test_certificate_generator.py
+├── conftest.py
+├── test_api.py
 ├── test_bulk_certificate_service.py
-├── test_zip_service.py
-└── test_api.py
+├── test_certificate_generator.py
+├── test_certificate_service.py
+├── test_csv_service.py
+├── test_db.py
+├── test_generation_job.py
+├── test_health.py
+├── test_status_and_download.py
+├── test_template_service.py
+└── test_zip_service.py
 
 requirements.txt
 README.md
@@ -67,20 +80,20 @@ Dockerfile
 
 ## Running Locally
 
-Create and activate a virtual environment:
+1. Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-Install dependencies:
+2. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Start the API:
+3. Start the API server:
 
 ```bash
 uvicorn app.main:app --reload
@@ -92,7 +105,7 @@ The API will be available at:
 http://127.0.0.1:8000
 ```
 
-Interactive API documentation is available at:
+Interactive API documentation (Swagger UI) is available at:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -106,104 +119,129 @@ http://127.0.0.1:8000/docs
 GET /health
 ```
 
-Returns the health status of the application.
+Returns the health status of the application (`{"status": "ok"}`).
 
-### Bulk Certificate Generation
+---
+
+### Submit Bulk Certificate Generation
 
 ```http
 POST /api/v1/certificates/bulk
 ```
 
-Accepts a `multipart/form-data` request containing:
+Accepts a `multipart/form-data` request with a single file parameter:
 
-- `csv_file` — recipient CSV file
-- `template_file` — HTML certificate template
+- `csv_file` — recipient CSV data (`.csv` file)
 
-The API generates certificates for valid records and returns a ZIP archive.
+The endpoint validates the CSV records, persists a new `GenerationRequest` in the SQLite database, schedules the generation job in the background, and immediately returns **HTTP 202 Accepted** with a unique `request_id`:
+
+```json
+{
+  "request_id": "c9d4ef82-3d5b-4899-b14a-7186d9a04f21",
+  "status": "pending"
+}
+```
+
+The certificate template is predefined at `templates/certificate.html`. Clients do not provide a template file.
+
+---
+
+### Check Request Status
+
+```http
+GET /api/v1/certificates/{request_id}
+```
+
+Retrieves the current status, counts, and metadata for a generation request:
+
+```json
+{
+  "request_id": "c9d4ef82-3d5b-4899-b14a-7186d9a04f21",
+  "status": "completed",
+  "total": 2,
+  "completed": 2,
+  "failed": 0,
+  "created_at": "2026-10-07T12:00:00+00:00",
+  "completed_at": "2026-10-07T12:00:04+00:00",
+  "available": true,
+  "error_message": null
+}
+```
+
+#### Status Values
+
+| Status | Description |
+|---|---|
+| `pending` | Request accepted and queued for processing |
+| `processing` | Background worker is actively generating certificates |
+| `completed` | All certificates generated successfully |
+| `completed_with_errors` | Completed with partial failures (some certificates generated, some failed) |
+| `failed` | Processing failed entirely (e.g., all rows failed or template error) |
+
+#### Progress Fields
+
+- `total` — total number of recipient records from CSV
+- `completed` — number of certificates successfully rendered and packaged
+- `failed` — number of records that failed generation
+- `available` — boolean indicating whether the output ZIP is ready for download
+- `error_message` — error description if generation failed
+
+---
+
+### Download Generated Certificates
+
+```http
+GET /api/v1/certificates/{request_id}/download
+```
+
+Downloads the generated ZIP archive once processing is finished.
+
+- **HTTP 200**: Returns `application/zip` stream named `certificates_<request_id>.zip`
+- **HTTP 404**: Request not found or ZIP archive not available
+- **HTTP 409**: Request is still `pending` or `processing`
 
 ## CSV Format
 
-The CSV file must contain the following columns:
+The uploaded CSV file must contain the following columns:
 
 ```text
 name,email,course,date,certificate_id
 ```
 
-Example:
+### Column Descriptions
+
+- `name` — Full name of the recipient
+- `email` — Recipient email address (validated for correct format)
+- `course` — Name of the course, training, or event
+- `date` — Issue date of the certificate
+- `certificate_id` — Unique identifier for the certificate (used in output filenames)
+
+### Example
 
 ```csv
 name,email,course,date,certificate_id
-Aaryan,aaryan@example.com,Python Development,2026-10-07,CERT-001
-Rahul,rahul@example.com,FastAPI Development,2026-10-07,CERT-002
+Alice Johnson,alice@example.com,Python Programming,2026-10-07,CERT-001
+Bob Smith,bob@example.com,FastAPI Development,2026-10-07,CERT-002
 ```
-
-The service validates required columns, required values, email addresses, and duplicate certificate IDs.
 
 ## Template
 
-The certificate template is an HTML file using Jinja2 variables.
+Certificates are rendered using the predefined template at `templates/certificate.html`. The template uses Jinja2 syntax and supports the following variables matching the CSV columns:
 
-Supported variables include:
+- `{{ name }}` — Recipient's name
+- `{{ email }}` — Recipient's email address
+- `{{ course }}` — Course name
+- `{{ date }}` — Issue date
+- `{{ certificate_id }}` — Certificate identifier
 
-```html
-{{ name }}
-{{ email }}
-{{ course }}
-{{ date }}
-{{ certificate_id }}
-```
+## Output & Error Handling
 
-Example:
-
-```html
-<h1>Certificate of Completion</h1>
-
-<p>This certificate is awarded to {{ name }}</p>
-
-<p>for successfully completing {{ course }}</p>
-
-<p>Date: {{ date }}</p>
-
-<p>Certificate ID: {{ certificate_id }}</p>
-```
-
-## Output
-
-For each successfully processed record, the API generates a PDF with a deterministic filename:
-
-```text
-certificate_<certificate_id>.pdf
-```
-
-For example:
-
-```text
-certificate_CERT-001.pdf
-certificate_CERT-002.pdf
-```
-
-All successful certificates are packaged into a ZIP archive and returned to the client.
-
-When some records fail while others succeed, the ZIP also contains:
-
-```text
-FAILURES.txt
-```
-
-This file contains information about the failed records instead of silently discarding them.
-
-## Error Handling
-
-The API handles invalid input and processing failures with appropriate HTTP responses.
-
-Typical responses include:
-
-| Status | Meaning |
-|---|---|
-| `200` | Certificates generated successfully, including partial-success cases |
-| `400` | Invalid request or file input |
-| `422` | No certificates could be generated |
-| `500` | Unexpected server-side failure |
+- **PDF Naming**: For each successful record, a PDF named `certificate_<certificate_id>.pdf` is created.
+- **ZIP Packaging**: All generated PDFs are packaged into a ZIP archive stored at `generated/output/<request_id>.zip`.
+- **Partial Failure Handling**: If some records fail while others succeed:
+  - Request status is set to `completed_with_errors`.
+  - Successfully generated certificates are included in the ZIP.
+  - A `FAILURES.txt` file is included in the ZIP describing each failed row, certificate ID, and error reason.
 
 ## Running Tests
 
@@ -213,36 +251,12 @@ Run the complete test suite with:
 python -m pytest -q
 ```
 
-The project currently contains **67 automated tests** covering CSV validation, template rendering, PDF generation, certificate orchestration, ZIP generation, bulk processing, and API behavior.
-
-## Design
-
-The project intentionally keeps the architecture simple and focused on the assignment requirements.
-
-The request flow is:
-
-```text
-CSV + HTML Template
-        ↓
-   API Validation
-        ↓
-    CSV Parsing
-        ↓
- Template Rendering
-        ↓
-   PDF Generation
-        ↓
- Bulk Processing
-        ↓
-   ZIP Generation
-        ↓
-    ZIP Response
-```
-
-Business logic is kept in service modules rather than being implemented directly inside the API route.
-
-The project does not use a database, authentication, background workers, message queues, or external cloud services.
-
-## License
-
-This project was created as a software-engineering assignment and learning project.
+The test suite contains **86 passing tests** with automated SQLite test database isolation covering:
+- CSV parsing and validation
+- Jinja2 template rendering
+- PDF generation with WeasyPrint
+- Bulk certificate processing
+- ZIP packaging and failure report generation
+- Database models and CRUD operations
+- Asynchronous generation background jobs
+- API endpoints (bulk generation submission, status polling, and ZIP downloading)
