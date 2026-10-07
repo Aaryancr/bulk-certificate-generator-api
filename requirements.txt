@@ -8,3 +8,4 @@ httpx==0.27.2
 weasyprint==70.0
 pydyf==0.12.1
 tinyhtml5==2.1.0
+sqlalchemy==2.0.23
